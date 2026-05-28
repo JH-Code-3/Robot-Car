@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, render_template_string, Response
 from picarx import Picarx
 from picarx.music import Music
+from picarx.led import LED
 from picamera2 import Picamera2
 import threading
 import socket
@@ -20,6 +21,7 @@ cam_lock = threading.Lock()
 _lights_on = False
 
 music = Music()
+led = LED()
 HORN_SOUND = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'sounds', 'car-double-horn.wav')
 
 # ── Camera via picamera2 ──────────────────────────────────────────────────────
@@ -496,8 +498,7 @@ def lights():
     data = request.get_json(silent=True) or {}
     _lights_on = bool(data.get('on', False))
     try:
-        for led in px.leds:
-            led.on() if _lights_on else led.off()
+        led.on() if _lights_on else led.off()
     except Exception:
         pass
     return jsonify(ok=True, on=_lights_on)
@@ -532,7 +533,6 @@ if __name__ == '__main__':
         except Exception:
             pass
         try:
-            for led in px.leds:
-                led.off()
+            led.off()
         except Exception:
             pass
