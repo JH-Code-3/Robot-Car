@@ -50,6 +50,7 @@ def _capture_loop():
     while True:
         frame = _picam.capture_array()
         if frame is not None:
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
             _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
             with _frame_lock:
                 _latest_frame = buf.tobytes()
