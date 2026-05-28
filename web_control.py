@@ -28,19 +28,19 @@ _picam.configure(_picam.create_video_configuration(
     main={"size": (640, 480), "format": "BGR888"}
 ))
 _picam.start()
-time.sleep(0.5)
+time.sleep(2.0)  # allow AWB and AE to fully settle before capturing
 
-# Color correction: proper white balance, exposure, saturation, and sharpness
 try:
     _picam.set_controls({
         "AwbEnable": True,
         "AeEnable": True,
-        "Saturation": 1.3,
-        "Sharpness": 1.5,
-        "Contrast": 1.1,
+        "Saturation": 1.0,
+        "Sharpness": 1.2,
+        "Contrast": 1.0,
     })
 except Exception:
     pass
+time.sleep(0.5)
 
 _frame_lock = threading.Lock()
 _latest_frame = None
