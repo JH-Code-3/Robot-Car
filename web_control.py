@@ -1,9 +1,11 @@
 from flask import Flask, request, jsonify, render_template_string, Response
 from picarx import Picarx
+from picarx.music import Music
 from picamera2 import Picamera2
 import threading
 import socket
 import time
+import os
 import cv2
 
 app = Flask(__name__)
@@ -16,6 +18,9 @@ TILT_MAX = 35
 
 cam_lock = threading.Lock()
 _lights_on = False
+
+music = Music()
+HORN_SOUND = os.path.expanduser('~/picar-x/sounds/car-double-horn.wav')
 
 # ── Camera via picamera2 ──────────────────────────────────────────────────────
 _picam = Picamera2()
@@ -477,14 +482,11 @@ def camera():
 @app.route('/horn', methods=['POST'])
 def horn():
     data = request.get_json(silent=True) or {}
-    on = bool(data.get('on', False))
-    try:
-        if on:
-            px.buzzer.on()
-        else:
-            px.buzzer.off()
-    except Exception:
-        pass
+    if data.get('on', False):
+        try:
+            music.sound_play_threading(HORN_SOUND)
+        except Exception:
+            pass
     return jsonify(ok=True)
 
 @app.route('/lights', methods=['POST'])
