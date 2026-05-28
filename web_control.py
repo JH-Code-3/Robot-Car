@@ -20,7 +20,7 @@ cam_lock = threading.Lock()
 _lights_on = False
 
 music = Music()
-HORN_SOUND = os.path.expanduser('~/picar-x/sounds/car-double-horn.wav')
+HORN_SOUND = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'sounds', 'car-double-horn.wav')
 
 # ── Camera via picamera2 ──────────────────────────────────────────────────────
 _picam = Picamera2()
