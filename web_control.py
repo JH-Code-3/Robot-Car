@@ -15,6 +15,7 @@ PAN_MAX = 35
 TILT_MAX = 35
 
 cam_lock = threading.Lock()
+_lights_on = False
 
 # ── Camera via picamera2 ──────────────────────────────────────────────────────
 _picam = Picamera2()
@@ -24,6 +25,18 @@ _picam.configure(_picam.create_video_configuration(
 _picam.start()
 time.sleep(0.5)
 
+# Color correction: proper white balance, exposure, saturation, and sharpness
+try:
+    _picam.set_controls({
+        "AwbEnable": True,
+        "AeEnable": True,
+        "Saturation": 1.3,
+        "Sharpness": 1.5,
+        "Contrast": 1.1,
+    })
+except Exception:
+    pass
+
 _frame_lock = threading.Lock()
 _latest_frame = None
 
@@ -32,10 +45,10 @@ def _capture_loop():
     while True:
         frame = _picam.capture_array()
         if frame is not None:
-            _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
+            _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
             with _frame_lock:
                 _latest_frame = buf.tobytes()
-        time.sleep(0.04)
+        time.sleep(0.033)
 
 threading.Thread(target=_capture_loop, daemon=True).start()
 
@@ -45,7 +58,7 @@ def _gen_frames():
             frame = _latest_frame
         if frame:
             yield b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n'
-        time.sleep(0.04)
+        time.sleep(0.033)
 
 # ── HTML ─────────────────────────────────────────────────────────────────────
 HTML = """<!DOCTYPE html>
@@ -61,6 +74,7 @@ HTML = """<!DOCTYPE html>
       overflow: hidden;
       background: #000;
       touch-action: none;
+      font-family: system-ui, sans-serif;
     }
 
     /* Live feed — full-screen background */
@@ -80,7 +94,7 @@ HTML = """<!DOCTYPE html>
       touch-action: none;
     }
 
-    /* Aim dot — shows where camera is pointing, stays on release */
+    /* Aim dot — shows where camera is pointing */
     #aimDot {
       position: fixed;
       width: 26px; height: 26px;
@@ -125,23 +139,68 @@ HTML = """<!DOCTYPE html>
     }
     .joy-knob.active { transition: none; }
 
-    /* Center-camera button — fixed bottom-right */
-    #camCenter {
+    /* Speed control — above joystick */
+    .speed-ctrl {
+      position: fixed;
+      bottom: 188px; left: 24px;
+      z-index: 2;
+      width: 150px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      touch-action: pan-x;
+    }
+    .speed-label {
+      color: rgba(255, 255, 255, 0.6);
+      font-size: 0.68rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    #speedSlider {
+      width: 100%;
+      accent-color: rgba(0, 170, 255, 0.9);
+      cursor: pointer;
+      touch-action: pan-x;
+    }
+
+    /* Right button column */
+    .btn-col {
       position: fixed;
       bottom: 24px; right: 24px;
       z-index: 2;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      align-items: center;
+    }
+    .icon-btn {
       width: 56px; height: 56px;
       border-radius: 50%;
       background: rgba(0, 0, 0, 0.5);
       border: 1.5px solid rgba(255, 255, 255, 0.2);
-      color: rgba(255, 255, 255, 0.55);
-      font-size: 1.5rem;
+      color: rgba(255, 255, 255, 0.6);
+      font-size: 1.3rem;
       line-height: 1;
       cursor: pointer;
-      touch-action: none;
+      touch-action: manipulation;
       backdrop-filter: blur(8px);
       -webkit-backdrop-filter: blur(8px);
       -webkit-tap-highlight-color: transparent;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .icon-btn.active {
+      background: rgba(0, 170, 255, 0.35);
+      border-color: rgba(0, 170, 255, 0.7);
+      color: rgba(255, 255, 255, 0.9);
+    }
+    #hornBtn.active {
+      background: rgba(255, 80, 80, 0.4);
+      border-color: rgba(255, 80, 80, 0.8);
+      color: rgba(255, 200, 200, 0.95);
     }
   </style>
 </head>
@@ -157,15 +216,25 @@ HTML = """<!DOCTYPE html>
     </div>
   </div>
 
-  <button id="camCenter">&#8982;</button>
+  <div class="speed-ctrl">
+    <span class="speed-label">SPD <span id="speedVal">60</span></span>
+    <input type="range" id="speedSlider" min="10" max="100" value="60" step="5">
+  </div>
+
+  <!-- Horn=&#9836; Lights=&#10022; Camera=&#8982; -->
+  <div class="btn-col">
+    <button id="hornBtn"   class="icon-btn" title="Hold to beep (Space)">&#9836;</button>
+    <button id="lightsBtn" class="icon-btn" title="Toggle lights (L)">&#10022;</button>
+    <button id="camCenter" class="icon-btn" title="Center camera (C)">&#8982;</button>
+  </div>
 
   <script>
     // ── Joystick ──────────────────────────────────────────────────
     const joyWrap  = document.getElementById('joyWrap');
     const joyBase  = document.getElementById('joyBase');
     const knob     = document.getElementById('joyKnob');
-    const JOY_R    = 45;   // max knob travel in px
-    const MAX_SPEED  = 60;
+    const JOY_R    = 45;
+    let   MAX_SPEED  = 60;
     const MAX_ANGLE  = 30;
     let joyActive = false;
 
@@ -220,6 +289,17 @@ HTML = """<!DOCTYPE html>
     document.addEventListener('mousemove',  e => { if (joyActive) joyMove(e); });
     document.addEventListener('mouseup',    e => { if (joyActive) joyEnd(e); });
 
+    // ── Speed slider ──────────────────────────────────────────────
+    const speedSlider = document.getElementById('speedSlider');
+    const speedVal    = document.getElementById('speedVal');
+
+    speedSlider.addEventListener('input', () => {
+      MAX_SPEED = parseInt(speedSlider.value, 10);
+      speedVal.textContent = MAX_SPEED;
+    });
+    speedSlider.addEventListener('touchstart', e => e.stopPropagation(), { passive: true });
+    speedSlider.addEventListener('touchmove',  e => e.stopPropagation(), { passive: true });
+
     // ── Camera drag (full screen, stays on release) ───────────────
     const drag    = document.getElementById('camDrag');
     const aimDot  = document.getElementById('aimDot');
@@ -259,7 +339,8 @@ HTML = """<!DOCTYPE html>
     drag.addEventListener('mouseleave',  e => { if (isDragging) dragEnd(e); });
 
     // ── Center camera button ──────────────────────────────────────
-    document.getElementById('camCenter').addEventListener('click', () => {
+    document.getElementById('camCenter').addEventListener('click', e => {
+      e.stopPropagation();
       lastPan = 0; lastTilt = 0;
       aimDot.style.left = '50%';
       aimDot.style.top  = '50%';
@@ -268,6 +349,92 @@ HTML = """<!DOCTYPE html>
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pan: 0, tilt: 0 }),
       }).catch(() => {});
+    });
+
+    // ── Horn button (hold to beep) ────────────────────────────────
+    const hornBtn = document.getElementById('hornBtn');
+    let hornActive = false;
+
+    function startHorn() {
+      if (hornActive) return;
+      hornActive = true;
+      hornBtn.classList.add('active');
+      fetch('/horn', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ on: true }),
+      }).catch(() => {});
+    }
+    function stopHorn() {
+      if (!hornActive) return;
+      hornActive = false;
+      hornBtn.classList.remove('active');
+      fetch('/horn', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ on: false }),
+      }).catch(() => {});
+    }
+
+    hornBtn.addEventListener('touchstart',  e => { e.preventDefault(); e.stopPropagation(); startHorn(); }, { passive: false });
+    hornBtn.addEventListener('touchend',    e => { e.preventDefault(); e.stopPropagation(); stopHorn();  }, { passive: false });
+    hornBtn.addEventListener('touchcancel', e => { e.preventDefault(); e.stopPropagation(); stopHorn();  }, { passive: false });
+    hornBtn.addEventListener('mousedown',   e => { e.stopPropagation(); startHorn(); });
+    document.addEventListener('mouseup',    () => { if (hornActive) stopHorn(); });
+
+    // ── Lights toggle ─────────────────────────────────────────────
+    const lightsBtn = document.getElementById('lightsBtn');
+    let lightsOn = false;
+
+    function toggleLights() {
+      lightsOn = !lightsOn;
+      lightsBtn.classList.toggle('active', lightsOn);
+      fetch('/lights', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ on: lightsOn }),
+      }).catch(() => {});
+    }
+
+    lightsBtn.addEventListener('click', e => { e.stopPropagation(); toggleLights(); });
+
+    // ── Keyboard controls — WASD/arrows + Space=horn, L=lights, C=center ──
+    const keys = {};
+
+    function sendKeyDrive() {
+      let speed = 0, angle = 0;
+      if (keys['KeyW'] || keys['ArrowUp'])    speed =  MAX_SPEED;
+      if (keys['KeyS'] || keys['ArrowDown'])  speed = -MAX_SPEED;
+      if (keys['KeyA'] || keys['ArrowLeft'])  angle = -MAX_ANGLE;
+      if (keys['KeyD'] || keys['ArrowRight']) angle =  MAX_ANGLE;
+      sendDrive(angle, speed);
+    }
+
+    const DRIVE_KEYS = new Set(['KeyW','KeyS','KeyA','KeyD','ArrowUp','ArrowDown','ArrowLeft','ArrowRight']);
+
+    document.addEventListener('keydown', e => {
+      if (e.repeat) return;
+      if (DRIVE_KEYS.has(e.code)) {
+        e.preventDefault();
+        if (!joyActive) { keys[e.code] = true; sendKeyDrive(); }
+      } else if (e.code === 'Space') {
+        e.preventDefault();
+        startHorn();
+      } else if (e.code === 'KeyL') {
+        e.preventDefault();
+        toggleLights();
+      } else if (e.code === 'KeyC') {
+        e.preventDefault();
+        document.getElementById('camCenter').click();
+      }
+    });
+
+    document.addEventListener('keyup', e => {
+      if (DRIVE_KEYS.has(e.code) && keys[e.code]) {
+        delete keys[e.code];
+        if (!joyActive) sendKeyDrive();
+      }
+      if (e.code === 'Space') stopHorn();
     });
   </script>
 </body>
@@ -307,6 +474,31 @@ def camera():
         px.set_cam_tilt_angle(tilt)
     return jsonify(ok=True)
 
+@app.route('/horn', methods=['POST'])
+def horn():
+    data = request.get_json(silent=True) or {}
+    on = bool(data.get('on', False))
+    try:
+        if on:
+            px.buzzer.on()
+        else:
+            px.buzzer.off()
+    except Exception:
+        pass
+    return jsonify(ok=True)
+
+@app.route('/lights', methods=['POST'])
+def lights():
+    global _lights_on
+    data = request.get_json(silent=True) or {}
+    _lights_on = bool(data.get('on', False))
+    try:
+        for led in px.leds:
+            led.on() if _lights_on else led.off()
+    except Exception:
+        pass
+    return jsonify(ok=True, on=_lights_on)
+
 
 def _local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -323,6 +515,7 @@ if __name__ == '__main__':
     ip = _local_ip()
     print(f"\n  PiCar-X Web Controller")
     print(f"  Open on your phone: http://{ip}:5000\n")
+    print("  Keyboard: WASD/arrows=drive  Space=horn  L=lights  C=center-cam\n")
     try:
         app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
     finally:
@@ -331,3 +524,12 @@ if __name__ == '__main__':
         px.set_cam_tilt_angle(0)
         px.set_dir_servo_angle(0)
         px.stop()
+        try:
+            px.buzzer.off()
+        except Exception:
+            pass
+        try:
+            for led in px.leds:
+                led.off()
+        except Exception:
+            pass
