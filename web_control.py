@@ -1,7 +1,9 @@
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, Response
 from picarx import Picarx
 import threading
 import socket
+import time
+import cv2
 
 app = Flask(__name__)
 px = Picarx()
@@ -13,6 +15,33 @@ TILT_MAX = 35
 
 cam_lock = threading.Lock()
 
+# ── Camera capture thread ────────────────────────────────────────────────────
+_cap = cv2.VideoCapture(0)
+_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+_frame_lock = threading.Lock()
+_latest_frame = None
+
+def _capture_loop():
+    global _latest_frame
+    while True:
+        ok, frame = _cap.read()
+        if ok:
+            _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
+            with _frame_lock:
+                _latest_frame = buf.tobytes()
+
+threading.Thread(target=_capture_loop, daemon=True).start()
+
+def _gen_frames():
+    while True:
+        with _frame_lock:
+            frame = _latest_frame
+        if frame:
+            yield b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n'
+        time.sleep(0.04)  # ~25 fps
+
+# ── HTML ─────────────────────────────────────────────────────────────────────
 HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -21,38 +50,72 @@ HTML = """<!DOCTYPE html>
   <title>PiCar-X</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      background: #0d0d0d;
-      color: #eee;
-      font-family: system-ui, sans-serif;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      padding: 24px 16px;
-      gap: 32px;
-      min-height: 100dvh;
-      overscroll-behavior: none;
-    }
-    h1 {
-      font-size: 0.85rem;
-      letter-spacing: 3px;
-      text-transform: uppercase;
-      opacity: 0.4;
+    html, body {
+      width: 100%; height: 100%;
+      overflow: hidden;
+      background: #000;
+      touch-action: none;
     }
 
-    /* ── D-PAD ── */
+    /* Live feed — full-screen background */
+    #feed {
+      position: fixed;
+      inset: 0;
+      width: 100%; height: 100%;
+      object-fit: cover;
+      z-index: 0;
+    }
+
+    /* Camera drag layer — covers entire screen, sits above video */
+    #camDrag {
+      position: fixed;
+      inset: 0;
+      z-index: 1;
+      touch-action: none;
+    }
+
+    /* Aim dot — follows finger while dragging, transitions back to center on release */
+    #aimDot {
+      position: fixed;
+      width: 26px; height: 26px;
+      background: rgba(0, 170, 255, 0.9);
+      border-radius: 50%;
+      box-shadow: 0 0 14px 5px rgba(0, 170, 255, 0.45);
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      z-index: 3;
+      left: 50%; top: 50%;
+      opacity: 0.35;
+      transition: left 0.18s ease, top 0.18s ease, opacity 0.2s;
+    }
+    #aimDot.dragging {
+      opacity: 1;
+      transition: opacity 0.08s;
+    }
+
+    /* D-pad — fixed bottom-left, frosted over the video */
+    .dpad-wrap {
+      position: fixed;
+      bottom: 20px; left: 20px;
+      z-index: 2;
+      background: rgba(0, 0, 0, 0.5);
+      border-radius: 18px;
+      padding: 10px;
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+    }
     .dpad {
       display: grid;
-      grid-template-columns: repeat(3, 90px);
-      grid-template-rows: repeat(3, 90px);
-      gap: 8px;
+      grid-template-columns: repeat(3, 72px);
+      grid-template-rows: repeat(3, 72px);
+      gap: 6px;
     }
     .dpad-btn {
-      background: #1c1c1c;
-      border: 2px solid #2e2e2e;
-      border-radius: 14px;
-      color: #ccc;
-      font-size: 2rem;
+      background: rgba(255, 255, 255, 0.1);
+      border: 1.5px solid rgba(255, 255, 255, 0.18);
+      border-radius: 12px;
+      color: #ddd;
+      font-size: 1.6rem;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -60,140 +123,75 @@ HTML = """<!DOCTYPE html>
       user-select: none;
       -webkit-tap-highlight-color: transparent;
       touch-action: none;
-      transition: background 0.08s, border-color 0.08s, color 0.08s;
+      transition: background 0.07s, border-color 0.07s;
     }
     .dpad-btn.active {
-      background: #0af;
+      background: rgba(0, 170, 255, 0.75);
       border-color: #0af;
-      color: #000;
+      color: #fff;
     }
-    .dpad-stop { font-size: 1.1rem; color: #555; }
-    .dpad-stop.active { background: #f44; border-color: #f44; color: #fff; }
+    .dpad-stop { font-size: 1rem; color: rgba(255,255,255,0.35); }
+    .dpad-stop.active { background: rgba(255, 55, 55, 0.75); border-color: #f44; }
     .dpad-empty { visibility: hidden; }
-
-    /* ── CAMERA PAD ── */
-    .cam-section { display: flex; flex-direction: column; align-items: center; gap: 10px; }
-    .cam-label { font-size: 0.75rem; letter-spacing: 2px; opacity: 0.35; }
-    .cam-pad {
-      width: 260px;
-      height: 260px;
-      background: #1c1c1c;
-      border: 2px solid #2e2e2e;
-      border-radius: 20px;
-      position: relative;
-      touch-action: none;
-      cursor: crosshair;
-      overflow: hidden;
-    }
-    /* crosshair lines */
-    .cam-pad::before, .cam-pad::after {
-      content: '';
-      position: absolute;
-      background: #2e2e2e;
-      pointer-events: none;
-    }
-    .cam-pad::before { left: 50%; top: 12%; bottom: 12%; width: 1px; transform: translateX(-50%); }
-    .cam-pad::after  { top: 50%; left: 12%; right: 12%; height: 1px; transform: translateY(-50%); }
-    .cam-dot {
-      width: 22px;
-      height: 22px;
-      background: #0af;
-      border-radius: 50%;
-      position: absolute;
-      left: 50%;
-      top: 50%;
-      transform: translate(-50%, -50%);
-      pointer-events: none;
-      box-shadow: 0 0 10px #0af8;
-    }
-    .cam-reset-hint {
-      font-size: 0.7rem;
-      opacity: 0.25;
-      letter-spacing: 1px;
-    }
   </style>
 </head>
 <body>
-  <h1>PiCar-X Control</h1>
 
-  <!-- D-PAD -->
-  <div class="dpad">
-    <div class="dpad-empty"></div>
-    <div class="dpad-btn" data-dir="forward">&#9650;</div>
-    <div class="dpad-empty"></div>
-    <div class="dpad-btn" data-dir="left">&#9664;</div>
-    <div class="dpad-btn dpad-stop" data-dir="stop">&#9632;</div>
-    <div class="dpad-btn" data-dir="right">&#9654;</div>
-    <div class="dpad-empty"></div>
-    <div class="dpad-btn" data-dir="backward">&#9660;</div>
-    <div class="dpad-empty"></div>
-  </div>
+  <img id="feed" src="/video_feed" alt="">
+  <div id="aimDot"></div>
+  <div id="camDrag"></div>
 
-  <!-- CAMERA TOUCH PAD -->
-  <div class="cam-section">
-    <div class="cam-label">CAMERA &mdash; DRAG TO LOOK</div>
-    <div class="cam-pad" id="camPad">
-      <div class="cam-dot" id="camDot"></div>
+  <div class="dpad-wrap">
+    <div class="dpad">
+      <div class="dpad-empty"></div>
+      <div class="dpad-btn" data-dir="forward">&#9650;</div>
+      <div class="dpad-empty"></div>
+      <div class="dpad-btn" data-dir="left">&#9664;</div>
+      <div class="dpad-btn dpad-stop" data-dir="stop">&#9632;</div>
+      <div class="dpad-btn" data-dir="right">&#9654;</div>
+      <div class="dpad-empty"></div>
+      <div class="dpad-btn" data-dir="backward">&#9660;</div>
+      <div class="dpad-empty"></div>
     </div>
-    <div class="cam-reset-hint">Release to center</div>
   </div>
 
   <script>
-    // ── Movement ────────────────────────────────────────────────
-    const dpadBtns = document.querySelectorAll('.dpad-btn');
-
+    // ── Movement ─────────────────────────────────────────────────
     function sendMove(dir) {
       fetch('/move/' + dir, { method: 'POST' }).catch(() => {});
     }
 
-    dpadBtns.forEach(btn => {
+    document.querySelectorAll('.dpad-btn').forEach(btn => {
       const dir = btn.dataset.dir;
+      const start = () => { btn.classList.add('active');    sendMove(dir); };
+      const end   = () => { btn.classList.remove('active'); if (dir !== 'stop') sendMove('stop'); };
 
-      btn.addEventListener('touchstart', e => {
-        e.preventDefault();
-        btn.classList.add('active');
-        sendMove(dir);
-      }, { passive: false });
-
-      btn.addEventListener('touchend', e => {
-        e.preventDefault();
-        btn.classList.remove('active');
-        if (dir !== 'stop') sendMove('stop');
-      }, { passive: false });
-
-      // Mouse fallback (desktop testing)
-      btn.addEventListener('mousedown', () => { btn.classList.add('active'); sendMove(dir); });
-      btn.addEventListener('mouseup',   () => { btn.classList.remove('active'); if (dir !== 'stop') sendMove('stop'); });
-      btn.addEventListener('mouseleave',() => { if (btn.classList.contains('active')) { btn.classList.remove('active'); if (dir !== 'stop') sendMove('stop'); } });
+      btn.addEventListener('touchstart', e => { e.stopPropagation(); e.preventDefault(); start(); }, { passive: false });
+      btn.addEventListener('touchend',   e => { e.stopPropagation(); e.preventDefault(); end();   }, { passive: false });
+      btn.addEventListener('mousedown',  e => { e.stopPropagation(); start(); });
+      btn.addEventListener('mouseup',    e => { e.stopPropagation(); end();   });
+      btn.addEventListener('mouseleave', () => { if (btn.classList.contains('active')) end(); });
     });
 
-    // ── Camera ──────────────────────────────────────────────────
-    const pad    = document.getElementById('camPad');
-    const dot    = document.getElementById('camDot');
+    // ── Camera drag (full screen) ─────────────────────────────────
+    const drag    = document.getElementById('camDrag');
+    const aimDot  = document.getElementById('aimDot');
     const PAN_MAX  = 35;
     const TILT_MAX = 35;
-    let camActive = false;
+    let isDragging = false;
     let lastPan = 0, lastTilt = 0;
 
-    function pointerPos(e) {
-      const rect = pad.getBoundingClientRect();
-      const src  = e.touches ? e.touches[0] : e;
-      return {
-        x: Math.max(0, Math.min(rect.width,  src.clientX - rect.left)),
-        y: Math.max(0, Math.min(rect.height, src.clientY - rect.top)),
-        w: rect.width,
-        h: rect.height,
-      };
+    function srcPos(e) {
+      const s = e.touches ? e.touches[0] : e;
+      return { x: s.clientX, y: s.clientY };
     }
 
-    function updateCamera(e) {
-      const { x, y, w, h } = pointerPos(e);
-      const pan  = Math.round(((x / w) - 0.5) *  2 * PAN_MAX);
-      const tilt = Math.round(((y / h) - 0.5) * -2 * TILT_MAX); // drag up = look up
-
-      dot.style.left = x + 'px';
-      dot.style.top  = y + 'px';
-
+    function applyCamera(e) {
+      const { x, y } = srcPos(e);
+      const pan  = Math.round(((x / window.innerWidth)  - 0.5) *  2 * PAN_MAX);
+      const tilt = Math.round(((y / window.innerHeight) - 0.5) * -2 * TILT_MAX);
+      aimDot.style.left = x + 'px';
+      aimDot.style.top  = y + 'px';
       if (pan !== lastPan || tilt !== lastTilt) {
         lastPan = pan; lastTilt = tilt;
         fetch('/camera', {
@@ -204,11 +202,22 @@ HTML = """<!DOCTYPE html>
       }
     }
 
-    function centerCamera() {
-      camActive = false;
-      dot.style.left = '50%';
-      dot.style.top  = '50%';
-      dot.style.transform = 'translate(-50%, -50%)';
+    function dragStart(e) {
+      e.preventDefault();
+      isDragging = true;
+      aimDot.classList.add('dragging');
+      applyCamera(e);
+    }
+    function dragMove(e) {
+      e.preventDefault();
+      if (isDragging) applyCamera(e);
+    }
+    function dragEnd(e) {
+      e.preventDefault();
+      isDragging = false;
+      aimDot.classList.remove('dragging');
+      aimDot.style.left = '50%';
+      aimDot.style.top  = '50%';
       if (lastPan !== 0 || lastTilt !== 0) {
         lastPan = 0; lastTilt = 0;
         fetch('/camera', {
@@ -219,35 +228,27 @@ HTML = """<!DOCTYPE html>
       }
     }
 
-    pad.addEventListener('touchstart', e => {
-      e.preventDefault();
-      camActive = true;
-      dot.style.transform = 'translate(-50%, -50%)';
-      updateCamera(e);
-    }, { passive: false });
-
-    pad.addEventListener('touchmove', e => {
-      e.preventDefault();
-      if (camActive) updateCamera(e);
-    }, { passive: false });
-
-    pad.addEventListener('touchend',   e => { e.preventDefault(); centerCamera(); }, { passive: false });
-    pad.addEventListener('touchcancel',e => { e.preventDefault(); centerCamera(); }, { passive: false });
-
-    // Mouse fallback
-    pad.addEventListener('mousedown', e => { camActive = true; dot.style.transform = 'translate(-50%, -50%)'; updateCamera(e); });
-    pad.addEventListener('mousemove', e => { if (camActive) updateCamera(e); });
-    pad.addEventListener('mouseup',   () => centerCamera());
-    pad.addEventListener('mouseleave',() => { if (camActive) centerCamera(); });
+    drag.addEventListener('touchstart',  dragStart, { passive: false });
+    drag.addEventListener('touchmove',   dragMove,  { passive: false });
+    drag.addEventListener('touchend',    dragEnd,   { passive: false });
+    drag.addEventListener('touchcancel', dragEnd,   { passive: false });
+    drag.addEventListener('mousedown',   dragStart);
+    drag.addEventListener('mousemove',   dragMove);
+    drag.addEventListener('mouseup',     dragEnd);
+    drag.addEventListener('mouseleave',  e => { if (isDragging) dragEnd(e); });
   </script>
 </body>
 </html>"""
 
 
+# ── Routes ───────────────────────────────────────────────────────────────────
 @app.route('/')
 def index():
     return render_template_string(HTML)
 
+@app.route('/video_feed')
+def video_feed():
+    return Response(_gen_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 @app.route('/move/<direction>', methods=['POST'])
 def move(direction):
@@ -266,7 +267,6 @@ def move(direction):
     elif direction == 'stop':
         px.stop()
     return jsonify(ok=True)
-
 
 @app.route('/camera', methods=['POST'])
 def camera():
@@ -297,6 +297,7 @@ if __name__ == '__main__':
     try:
         app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
     finally:
+        _cap.release()
         px.set_cam_pan_angle(0)
         px.set_cam_tilt_angle(0)
         px.set_dir_servo_angle(0)
