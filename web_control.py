@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify, render_template_string, Response
 from picarx import Picarx
-from vilib import Vilib
+from picamera2 import Picamera2
 import threading
 import socket
 import time
@@ -16,9 +16,13 @@ TILT_MAX = 35
 
 cam_lock = threading.Lock()
 
-# ── Camera via vilib ─────────────────────────────────────────────────────────
-Vilib.camera_start(vflip=False, hflip=False)
-time.sleep(1)  # let camera warm up
+# ── Camera via picamera2 ──────────────────────────────────────────────────────
+_picam = Picamera2()
+_picam.configure(_picam.create_video_configuration(
+    main={"size": (640, 480), "format": "RGB888"}
+))
+_picam.start()
+time.sleep(0.5)
 
 _frame_lock = threading.Lock()
 _latest_frame = None
@@ -26,12 +30,13 @@ _latest_frame = None
 def _capture_loop():
     global _latest_frame
     while True:
-        img = Vilib.img
-        if img is not None:
-            _, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 65])
+        frame = _picam.capture_array()
+        if frame is not None:
+            bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            _, buf = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, 65])
             with _frame_lock:
                 _latest_frame = buf.tobytes()
-        time.sleep(0.04)  # ~25 fps
+        time.sleep(0.04)
 
 threading.Thread(target=_capture_loop, daemon=True).start()
 
@@ -299,7 +304,7 @@ if __name__ == '__main__':
     try:
         app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
     finally:
-        Vilib.camera_close()
+        _picam.stop()
         px.set_cam_pan_angle(0)
         px.set_cam_tilt_angle(0)
         px.set_dir_servo_angle(0)
