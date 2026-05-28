@@ -81,7 +81,7 @@ HTML = """<!DOCTYPE html>
       touch-action: none;
     }
 
-    /* Aim dot — follows finger while dragging, transitions back to center on release */
+    /* Aim dot — shows where camera is pointing, stays on release */
     #aimDot {
       position: fixed;
       width: 26px; height: 26px;
@@ -92,54 +92,58 @@ HTML = """<!DOCTYPE html>
       pointer-events: none;
       z-index: 3;
       left: 50%; top: 50%;
-      opacity: 0.35;
-      transition: left 0.18s ease, top 0.18s ease, opacity 0.2s;
+      opacity: 0.5;
+      transition: opacity 0.2s;
     }
-    #aimDot.dragging {
-      opacity: 1;
-      transition: opacity 0.08s;
-    }
+    #aimDot.dragging { opacity: 1; }
 
-    /* D-pad — fixed bottom-left, frosted over the video */
-    .dpad-wrap {
+    /* Joystick — fixed bottom-left */
+    .joy-wrap {
       position: fixed;
-      bottom: 20px; left: 20px;
+      bottom: 24px; left: 24px;
       z-index: 2;
+      touch-action: none;
+    }
+    .joy-base {
+      width: 150px; height: 150px;
+      border-radius: 50%;
       background: rgba(0, 0, 0, 0.5);
-      border-radius: 18px;
-      padding: 10px;
+      border: 2px solid rgba(255, 255, 255, 0.15);
       backdrop-filter: blur(8px);
       -webkit-backdrop-filter: blur(8px);
+      position: relative;
     }
-    .dpad {
-      display: grid;
-      grid-template-columns: repeat(3, 72px);
-      grid-template-rows: repeat(3, 72px);
-      gap: 6px;
+    .joy-knob {
+      width: 60px; height: 60px;
+      border-radius: 50%;
+      background: rgba(0, 170, 255, 0.7);
+      border: 2px solid rgba(0, 170, 255, 0.9);
+      box-shadow: 0 0 12px rgba(0, 170, 255, 0.4);
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      transition: transform 0.12s ease;
     }
-    .dpad-btn {
-      background: rgba(255, 255, 255, 0.1);
-      border: 1.5px solid rgba(255, 255, 255, 0.18);
-      border-radius: 12px;
-      color: #ddd;
-      font-size: 1.6rem;
-      display: flex;
-      align-items: center;
-      justify-content: center;
+    .joy-knob.active { transition: none; }
+
+    /* Center-camera button — fixed bottom-right */
+    #camCenter {
+      position: fixed;
+      bottom: 24px; right: 24px;
+      z-index: 2;
+      width: 56px; height: 56px;
+      border-radius: 50%;
+      background: rgba(0, 0, 0, 0.5);
+      border: 1.5px solid rgba(255, 255, 255, 0.2);
+      color: rgba(255, 255, 255, 0.55);
+      font-size: 1.5rem;
+      line-height: 1;
       cursor: pointer;
-      user-select: none;
-      -webkit-tap-highlight-color: transparent;
       touch-action: none;
-      transition: background 0.07s, border-color 0.07s;
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      -webkit-tap-highlight-color: transparent;
     }
-    .dpad-btn.active {
-      background: rgba(0, 170, 255, 0.75);
-      border-color: #0af;
-      color: #fff;
-    }
-    .dpad-stop { font-size: 1rem; color: rgba(255,255,255,0.35); }
-    .dpad-stop.active { background: rgba(255, 55, 55, 0.75); border-color: #f44; }
-    .dpad-empty { visibility: hidden; }
   </style>
 </head>
 <body>
@@ -148,39 +152,76 @@ HTML = """<!DOCTYPE html>
   <div id="aimDot"></div>
   <div id="camDrag"></div>
 
-  <div class="dpad-wrap">
-    <div class="dpad">
-      <div class="dpad-empty"></div>
-      <div class="dpad-btn" data-dir="forward">&#9650;</div>
-      <div class="dpad-empty"></div>
-      <div class="dpad-btn" data-dir="left">&#9664;</div>
-      <div class="dpad-btn dpad-stop" data-dir="stop">&#9632;</div>
-      <div class="dpad-btn" data-dir="right">&#9654;</div>
-      <div class="dpad-empty"></div>
-      <div class="dpad-btn" data-dir="backward">&#9660;</div>
-      <div class="dpad-empty"></div>
+  <div class="joy-wrap" id="joyWrap">
+    <div class="joy-base" id="joyBase">
+      <div class="joy-knob" id="joyKnob"></div>
     </div>
   </div>
 
+  <button id="camCenter">&#8982;</button>
+
   <script>
-    // ── Movement ─────────────────────────────────────────────────
-    function sendMove(dir) {
-      fetch('/move/' + dir, { method: 'POST' }).catch(() => {});
+    // ── Joystick ──────────────────────────────────────────────────
+    const joyWrap  = document.getElementById('joyWrap');
+    const joyBase  = document.getElementById('joyBase');
+    const knob     = document.getElementById('joyKnob');
+    const JOY_R    = 45;   // max knob travel in px
+    const MAX_SPEED  = 60;
+    const MAX_ANGLE  = 30;
+    let joyActive = false;
+
+    function joyDelta(e) {
+      const r   = joyBase.getBoundingClientRect();
+      const cx  = r.left + r.width  / 2;
+      const cy  = r.top  + r.height / 2;
+      const src = e.touches ? e.touches[0] : e;
+      let dx = src.clientX - cx;
+      let dy = src.clientY - cy;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist > JOY_R) { dx = dx / dist * JOY_R; dy = dy / dist * JOY_R; }
+      return { dx, dy };
     }
 
-    document.querySelectorAll('.dpad-btn').forEach(btn => {
-      const dir = btn.dataset.dir;
-      const start = () => { btn.classList.add('active');    sendMove(dir); };
-      const end   = () => { btn.classList.remove('active'); if (dir !== 'stop') sendMove('stop'); };
+    function joyStart(e) {
+      e.preventDefault(); e.stopPropagation();
+      joyActive = true;
+      knob.classList.add('active');
+      joyMove(e);
+    }
+    function joyMove(e) {
+      e.preventDefault(); e.stopPropagation();
+      if (!joyActive) return;
+      const { dx, dy } = joyDelta(e);
+      knob.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
+      const angle = Math.round((dx / JOY_R) * MAX_ANGLE);
+      const speed = Math.round((-dy / JOY_R) * MAX_SPEED);
+      sendDrive(angle, speed);
+    }
+    function joyEnd(e) {
+      e.preventDefault(); e.stopPropagation();
+      joyActive = false;
+      knob.classList.remove('active');
+      knob.style.transform = 'translate(-50%, -50%)';
+      sendDrive(0, 0);
+    }
 
-      btn.addEventListener('touchstart', e => { e.stopPropagation(); e.preventDefault(); start(); }, { passive: false });
-      btn.addEventListener('touchend',   e => { e.stopPropagation(); e.preventDefault(); end();   }, { passive: false });
-      btn.addEventListener('mousedown',  e => { e.stopPropagation(); start(); });
-      btn.addEventListener('mouseup',    e => { e.stopPropagation(); end();   });
-      btn.addEventListener('mouseleave', () => { if (btn.classList.contains('active')) end(); });
-    });
+    function sendDrive(angle, speed) {
+      fetch('/drive', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ angle, speed }),
+      }).catch(() => {});
+    }
 
-    // ── Camera drag (full screen) ─────────────────────────────────
+    joyWrap.addEventListener('touchstart',  joyStart, { passive: false });
+    joyWrap.addEventListener('touchmove',   joyMove,  { passive: false });
+    joyWrap.addEventListener('touchend',    joyEnd,   { passive: false });
+    joyWrap.addEventListener('touchcancel', joyEnd,   { passive: false });
+    joyWrap.addEventListener('mousedown',   joyStart);
+    document.addEventListener('mousemove',  e => { if (joyActive) joyMove(e); });
+    document.addEventListener('mouseup',    e => { if (joyActive) joyEnd(e); });
+
+    // ── Camera drag (full screen, stays on release) ───────────────
     const drag    = document.getElementById('camDrag');
     const aimDot  = document.getElementById('aimDot');
     const PAN_MAX  = 35;
@@ -188,13 +229,9 @@ HTML = """<!DOCTYPE html>
     let isDragging = false;
     let lastPan = 0, lastTilt = 0;
 
-    function srcPos(e) {
-      const s = e.touches ? e.touches[0] : e;
-      return { x: s.clientX, y: s.clientY };
-    }
-
     function applyCamera(e) {
-      const { x, y } = srcPos(e);
+      const src = e.touches ? e.touches[0] : e;
+      const x = src.clientX, y = src.clientY;
       const pan  = Math.round(((x / window.innerWidth)  - 0.5) *  2 * PAN_MAX);
       const tilt = Math.round(((y / window.innerHeight) - 0.5) * -2 * TILT_MAX);
       aimDot.style.left = x + 'px';
@@ -209,31 +246,9 @@ HTML = """<!DOCTYPE html>
       }
     }
 
-    function dragStart(e) {
-      e.preventDefault();
-      isDragging = true;
-      aimDot.classList.add('dragging');
-      applyCamera(e);
-    }
-    function dragMove(e) {
-      e.preventDefault();
-      if (isDragging) applyCamera(e);
-    }
-    function dragEnd(e) {
-      e.preventDefault();
-      isDragging = false;
-      aimDot.classList.remove('dragging');
-      aimDot.style.left = '50%';
-      aimDot.style.top  = '50%';
-      if (lastPan !== 0 || lastTilt !== 0) {
-        lastPan = 0; lastTilt = 0;
-        fetch('/camera', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pan: 0, tilt: 0 }),
-        }).catch(() => {});
-      }
-    }
+    function dragStart(e) { e.preventDefault(); isDragging = true;  aimDot.classList.add('dragging');    applyCamera(e); }
+    function dragMove(e)  { e.preventDefault(); if (isDragging) applyCamera(e); }
+    function dragEnd(e)   { e.preventDefault(); isDragging = false; aimDot.classList.remove('dragging'); }
 
     drag.addEventListener('touchstart',  dragStart, { passive: false });
     drag.addEventListener('touchmove',   dragMove,  { passive: false });
@@ -243,6 +258,18 @@ HTML = """<!DOCTYPE html>
     drag.addEventListener('mousemove',   dragMove);
     drag.addEventListener('mouseup',     dragEnd);
     drag.addEventListener('mouseleave',  e => { if (isDragging) dragEnd(e); });
+
+    // ── Center camera button ──────────────────────────────────────
+    document.getElementById('camCenter').addEventListener('click', () => {
+      lastPan = 0; lastTilt = 0;
+      aimDot.style.left = '50%';
+      aimDot.style.top  = '50%';
+      fetch('/camera', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pan: 0, tilt: 0 }),
+      }).catch(() => {});
+    });
   </script>
 </body>
 </html>"""
@@ -257,21 +284,17 @@ def index():
 def video_feed():
     return Response(_gen_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
-@app.route('/move/<direction>', methods=['POST'])
-def move(direction):
-    if direction == 'forward':
-        px.set_dir_servo_angle(0)
-        px.forward(SPEED)
-    elif direction == 'backward':
-        px.set_dir_servo_angle(0)
-        px.backward(SPEED)
-    elif direction == 'left':
-        px.set_dir_servo_angle(-DIR_ANGLE)
-        px.forward(SPEED)
-    elif direction == 'right':
-        px.set_dir_servo_angle(DIR_ANGLE)
-        px.forward(SPEED)
-    elif direction == 'stop':
+@app.route('/drive', methods=['POST'])
+def drive():
+    data  = request.get_json(silent=True) or {}
+    angle = max(-DIR_ANGLE, min(DIR_ANGLE, int(data.get('angle', 0))))
+    speed = max(-SPEED,     min(SPEED,     int(data.get('speed', 0))))
+    px.set_dir_servo_angle(angle)
+    if speed > 0:
+        px.forward(speed)
+    elif speed < 0:
+        px.backward(abs(speed))
+    else:
         px.stop()
     return jsonify(ok=True)
 
