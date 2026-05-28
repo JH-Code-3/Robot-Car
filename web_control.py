@@ -1,7 +1,6 @@
 from flask import Flask, request, jsonify, render_template_string, Response
 from picarx import Picarx
 from picarx.music import Music
-from picarx.led import LED
 from picamera2 import Picamera2
 import threading
 import socket
@@ -18,10 +17,8 @@ PAN_MAX = 35
 TILT_MAX = 35
 
 cam_lock = threading.Lock()
-_lights_on = False
 
 music = Music()
-led = LED()
 HORN_SOUND = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'sounds', 'car-double-horn.wav')
 
 # ── Camera via picamera2 ──────────────────────────────────────────────────────
@@ -232,7 +229,6 @@ HTML = """<!DOCTYPE html>
   <!-- Horn=&#9836; Lights=&#10022; Camera=&#8982; -->
   <div class="btn-col">
     <button id="hornBtn"   class="icon-btn" title="Hold to beep (Space)">&#9836;</button>
-    <button id="lightsBtn" class="icon-btn" title="Toggle lights (L)">&#10022;</button>
     <button id="camCenter" class="icon-btn" title="Center camera (C)">&#8982;</button>
   </div>
 
@@ -390,23 +386,7 @@ HTML = """<!DOCTYPE html>
     hornBtn.addEventListener('mousedown',   e => { e.stopPropagation(); startHorn(); });
     document.addEventListener('mouseup',    () => { if (hornActive) stopHorn(); });
 
-    // ── Lights toggle ─────────────────────────────────────────────
-    const lightsBtn = document.getElementById('lightsBtn');
-    let lightsOn = false;
-
-    function toggleLights() {
-      lightsOn = !lightsOn;
-      lightsBtn.classList.toggle('active', lightsOn);
-      fetch('/lights', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ on: lightsOn }),
-      }).catch(() => {});
-    }
-
-    lightsBtn.addEventListener('click', e => { e.stopPropagation(); toggleLights(); });
-
-    // ── Keyboard controls — WASD/arrows + Space=horn, L=lights, C=center ──
+// ── Keyboard controls — WASD/arrows + Space=horn, C=center ──
     const keys = {};
 
     function sendKeyDrive() {
@@ -428,9 +408,6 @@ HTML = """<!DOCTYPE html>
       } else if (e.code === 'Space') {
         e.preventDefault();
         startHorn();
-      } else if (e.code === 'KeyL') {
-        e.preventDefault();
-        toggleLights();
       } else if (e.code === 'KeyC') {
         e.preventDefault();
         document.getElementById('camCenter').click();
@@ -492,17 +469,6 @@ def horn():
             pass
     return jsonify(ok=True)
 
-@app.route('/lights', methods=['POST'])
-def lights():
-    global _lights_on
-    data = request.get_json(silent=True) or {}
-    _lights_on = bool(data.get('on', False))
-    try:
-        led.on() if _lights_on else led.off()
-    except Exception:
-        pass
-    return jsonify(ok=True, on=_lights_on)
-
 
 def _local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -519,7 +485,7 @@ if __name__ == '__main__':
     ip = _local_ip()
     print(f"\n  PiCar-X Web Controller")
     print(f"  Open on your phone: http://{ip}:5000\n")
-    print("  Keyboard: WASD/arrows=drive  Space=horn  L=lights  C=center-cam\n")
+    print("  Keyboard: WASD/arrows=drive  Space=horn  C=center-cam\n")
     try:
         app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
     finally:
@@ -530,9 +496,5 @@ if __name__ == '__main__':
         px.stop()
         try:
             px.buzzer.off()
-        except Exception:
-            pass
-        try:
-            led.off()
         except Exception:
             pass
