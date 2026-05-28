@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify, render_template_string, Response
 from picarx import Picarx
+from vilib import Vilib
 import threading
 import socket
 import time
@@ -15,21 +16,22 @@ TILT_MAX = 35
 
 cam_lock = threading.Lock()
 
-# ── Camera capture thread ────────────────────────────────────────────────────
-_cap = cv2.VideoCapture(0)
-_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+# ── Camera via vilib ─────────────────────────────────────────────────────────
+Vilib.camera_start(vflip=False, hflip=False)
+time.sleep(1)  # let camera warm up
+
 _frame_lock = threading.Lock()
 _latest_frame = None
 
 def _capture_loop():
     global _latest_frame
     while True:
-        ok, frame = _cap.read()
-        if ok:
-            _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
+        img = Vilib.img
+        if img is not None:
+            _, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 65])
             with _frame_lock:
                 _latest_frame = buf.tobytes()
+        time.sleep(0.04)  # ~25 fps
 
 threading.Thread(target=_capture_loop, daemon=True).start()
 
@@ -39,7 +41,7 @@ def _gen_frames():
             frame = _latest_frame
         if frame:
             yield b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n'
-        time.sleep(0.04)  # ~25 fps
+        time.sleep(0.04)
 
 # ── HTML ─────────────────────────────────────────────────────────────────────
 HTML = """<!DOCTYPE html>
@@ -297,7 +299,7 @@ if __name__ == '__main__':
     try:
         app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
     finally:
-        _cap.release()
+        Vilib.camera_close()
         px.set_cam_pan_angle(0)
         px.set_cam_tilt_angle(0)
         px.set_dir_servo_angle(0)
