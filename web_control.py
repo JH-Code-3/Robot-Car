@@ -19,7 +19,7 @@ cam_lock = threading.Lock()
 # ── Camera via picamera2 ──────────────────────────────────────────────────────
 _picam = Picamera2()
 _picam.configure(_picam.create_video_configuration(
-    main={"size": (640, 480), "format": "RGB888"}
+    main={"size": (640, 480), "format": "BGR888"}
 ))
 _picam.start()
 time.sleep(0.5)
@@ -32,8 +32,7 @@ def _capture_loop():
     while True:
         frame = _picam.capture_array()
         if frame is not None:
-            bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-            _, buf = cv2.imencode('.jpg', bgr, [cv2.IMWRITE_JPEG_QUALITY, 65])
+            _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 65])
             with _frame_lock:
                 _latest_frame = buf.tobytes()
         time.sleep(0.04)
