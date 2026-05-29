@@ -1,0 +1,6 @@
+  secret.py
+  .DS_Store
+  __pycache__/
+  *.pyc
+  EOF
+EQF
