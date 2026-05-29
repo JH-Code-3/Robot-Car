@@ -8,6 +8,7 @@ import math
 import tempfile
 import os
 import time
+import subprocess
 
 # === TTS setup (local Piper voice) ===
 tts = Piper()
@@ -56,7 +57,7 @@ try:
         parts = user_input.lower().split()
         if len(parts) == 2 and parts[0] == "volume" and parts[1].isdigit():
             vol = max(0, min(100, int(parts[1])))
-            music.music_set_volume(vol)
+            subprocess.run(['amixer', 'sset', 'Master', f'{vol}%'], capture_output=True)
             print(f"Volume set to {vol}")
             continue
 
