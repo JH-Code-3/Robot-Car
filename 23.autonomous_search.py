@@ -189,22 +189,28 @@ def search(target: str):
 def main():
     print("=== Autonomous Search Robot ===")
     print("Type a target and the robot will go find it.")
-    print("Press Ctrl+C during a search to cancel.\n")
+    print("Press Ctrl+C during a search to cancel and enter a new target.\n")
+    time.sleep(0.5)  # let any terminal noise settle before first input
 
-    try:
-        while True:
+    while True:
+        try:
             target = input("What should I find? >>> ").strip()
-            if not target:
-                continue
-            if target.lower() in ("quit", "exit", "q"):
-                tts.say("Goodbye!")
-                break
-            search(target)
-            print("\nSearch complete. Enter a new target or type 'quit' to exit.")
-    finally:
-        px.stop()
-        px.set_dir_servo_angle(0)
-        camera.stop()
+        except KeyboardInterrupt:
+            # Ctrl+C at the prompt — ask if they want to quit
+            print("\nType 'quit' to exit, or enter a new target.")
+            continue
+
+        if not target:
+            continue
+        if target.lower() in ("quit", "exit", "q"):
+            tts.say("Goodbye!")
+            break
+        search(target)
+        print("\nSearch complete. Enter a new target or type 'quit' to exit.")
+
+    px.stop()
+    px.set_dir_servo_angle(0)
+    camera.stop()
 
 if __name__ == "__main__":
     main()
