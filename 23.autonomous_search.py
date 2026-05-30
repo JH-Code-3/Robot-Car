@@ -11,9 +11,11 @@ import openai
 import base64
 import time
 import threading
+import sys
+import termios
 
 # === Settings ===
-DRIVE_SPEED    = 40    # 0-100
+DRIVE_SPEED    = 40
 TURN_SPEED     = 35
 SAFE_DISTANCE  = 25   # cm — never move forward below this
 MOVE_DURATION  = 0.5  # seconds per movement step
@@ -32,6 +34,9 @@ time.sleep(2)  # let camera warm up
 
 # === OpenAI client ===
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
+
+# Global flag so Ctrl+C during a GPT call still stops the search
+_stop_search = threading.Event()
 
 SYSTEM_PROMPT = """
 You are the navigation brain of an autonomous PiCar-X robot car.
@@ -56,6 +61,13 @@ Navigation rules:
 """
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+
+def flush_stdin():
+    """Discard any keystrokes buffered before the prompt appears."""
+    try:
+        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+    except Exception:
+        pass
 
 def get_distance() -> float:
     d = round(px.ultrasonic.read(), 1)
@@ -88,16 +100,28 @@ def ask_gpt(target: str, distance: float, history: list) -> str:
 
     history.append(user_message)
 
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[{"role": "system", "content": SYSTEM_PROMPT}] + history,
-        max_tokens=80,
-    )
+    # Run the blocking API call in a thread so Ctrl+C can interrupt
+    result = [None]
+    def call():
+        result[0] = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "system", "content": SYSTEM_PROMPT}] + history,
+            max_tokens=80,
+        )
 
-    reply = response.choices[0].message.content.strip()
+    t = threading.Thread(target=call, daemon=True)
+    t.start()
+    while t.is_alive():
+        if _stop_search.is_set():
+            return ""
+        t.join(timeout=0.2)
+
+    if result[0] is None:
+        return ""
+
+    reply = result[0].choices[0].message.content.strip()
     history.append({"role": "assistant", "content": reply})
 
-    # keep history short to control cost and latency
     if len(history) > 16:
         history[:] = history[-16:]
 
@@ -146,19 +170,24 @@ def say_async(text: str):
 # ── main search loop ─────────────────────────────────────────────────────────
 
 def search(target: str):
+    _stop_search.clear()
     print(f"\nSearching for: {target}")
-    tts.say(f"Starting search for {target}. I'll let you know when I find it.")
+    print("(Press Ctrl+C to cancel and pick a new target)\n")
+    tts.say(f"Starting search for {target}.")
 
     history: list = []
 
     try:
-        while True:
+        while not _stop_search.is_set():
             distance = get_distance()
 
-            print(f"\nDistance: {distance}cm — asking GPT...")
+            print(f"Distance: {distance}cm — asking GPT...")
             response = ask_gpt(target, distance, history)
-            print(f"GPT: {response}")
 
+            if _stop_search.is_set() or not response:
+                break
+
+            print(f"GPT: {response}\n")
             move, found, say = parse(response)
 
             if say:
@@ -168,36 +197,43 @@ def search(target: str):
                 px.stop()
                 time.sleep(0.3)
                 tts.say(f"I found it! I found the {target}!")
-                print(f"\nTarget found: {target}")
+                print(f"Target found: {target}")
                 return
 
-            # Safety: never drive forward into an obstacle
             if move == "forward" and distance < SAFE_DISTANCE:
-                print("Safety override: too close, turning left instead")
+                print("Safety override: obstacle too close, turning instead")
                 move = "turn_left"
 
             execute(move)
             time.sleep(LOOP_DELAY)
 
     except KeyboardInterrupt:
-        px.stop()
-        tts.say("Search cancelled.")
-        print("\nSearch stopped.")
+        _stop_search.set()
+
+    px.stop()
+    print("\nSearch stopped.")
+    tts.say("Search cancelled.")
 
 # ── entry point ──────────────────────────────────────────────────────────────
 
 def main():
-    print("=== Autonomous Search Robot ===")
-    print("Type a target and the robot will go find it.")
-    print("Press Ctrl+C during a search to cancel and enter a new target.\n")
-    time.sleep(0.5)  # let any terminal noise settle before first input
+    # Print a clear banner after all hardware noise has settled
+    print("\n" + "=" * 40)
+    print("   AUTONOMOUS SEARCH ROBOT")
+    print("=" * 40)
+    print("Type a target to search for.")
+    print("Type 'quit' to exit.\n")
+
+    flush_stdin()  # throw away any keystrokes typed before this point
 
     while True:
         try:
-            target = input("What should I find? >>> ").strip()
+            sys.stdout.write("What should I find? >>> ")
+            sys.stdout.flush()
+            target = sys.stdin.readline().strip()
         except KeyboardInterrupt:
-            # Ctrl+C at the prompt — ask if they want to quit
-            print("\nType 'quit' to exit, or enter a new target.")
+            print("\nType 'quit' to exit.")
+            flush_stdin()
             continue
 
         if not target:
@@ -206,7 +242,8 @@ def main():
             tts.say("Goodbye!")
             break
         search(target)
-        print("\nSearch complete. Enter a new target or type 'quit' to exit.")
+        flush_stdin()  # clear any keys pressed during the search
+        print("\nEnter a new target or type 'quit' to exit.\n")
 
     px.stop()
     px.set_dir_servo_angle(0)
