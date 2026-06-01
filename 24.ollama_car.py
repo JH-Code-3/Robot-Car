@@ -2,9 +2,8 @@
 """
 Ollama-powered robot car — local LLM, no internet required.
 
-Controls:
-  m + Enter  — toggle microphone on/off  (starts MUTED to avoid noise)
-  anything + Enter — send a typed command directly to the LLM
+Voice:    say "hey buddy" then give your command
+Keyboard: just type and press Enter (VoiceAssistant handles it)
 """
 
 from picarx.llm import Ollama as LLM
@@ -12,24 +11,21 @@ from picarx.preset_actions import actions_dict, sounds_dict
 from voice_active_car import VoiceActiveCar
 
 import collections
-import threading
-import select
-import sys
 import re
+import time
 import urllib.request
 import urllib.error
-import time
+import sys
 
-# ─── Ollama ───────────────────────────────────────────────────────────────────
+# ─── Settings ────────────────────────────────────────────────────────────────
 OLLAMA_IP    = "localhost"
-OLLAMA_MODEL = "llama3.2:1b"   # use "llama3.2:3b" for smarter replies
+OLLAMA_MODEL = "llama3.2:1b"   # "llama3.2:3b" for smarter replies
 
-# ─── Robot ───────────────────────────────────────────────────────────────────
 NAME         = "Buddy"
-TOO_CLOSE    = 12          # cm — obstacle avoidance trigger distance
+TOO_CLOSE    = 12       # cm — obstacle trigger distance
 DRIVE_SPEED  = 40
 TURN_SPEED   = 35
-MOVE_TIME    = 0.8         # seconds the car drives per movement command
+MOVE_TIME    = 0.8      # seconds the car drives per movement command
 
 TTS_MODEL    = "en_US-ryan-low"
 STT_LANGUAGE = "en-us"
@@ -37,11 +33,11 @@ STT_LANGUAGE = "en-us"
 WAKE_ENABLE    = True
 WAKE_WORD      = ["hey buddy"]
 ANSWER_ON_WAKE = "Hi there!"
-WELCOME        = "Hi, I'm Buddy. Press m then Enter to unmute the mic!"
+WELCOME        = "Hi, I'm Buddy. Say hey buddy to wake me up!"
 
-MAX_SAME_TURN = 3
+MAX_SAME_TURN  = 3
 
-# Movement commands the car handles directly (bypasses action_flow)
+# These are handled by driving the motors directly, not action_flow
 MOVE_COMMANDS = {"forward", "backward", "turn_left", "turn_right", "stop"}
 
 INSTRUCTIONS = """You are Buddy, a PiCar-X robot car. Short replies only.
@@ -68,7 +64,7 @@ Hey there human!
 ACTIONS: nod
 
 User: stop
-Stopping!
+Stopping now!
 ACTIONS: stop
 
 User: dance
@@ -91,66 +87,24 @@ class SmartOllamaCar(VoiceActiveCar):
         super().__init__(*args, **kwargs)
         self._action_hist = collections.deque(maxlen=8)
         self._obs_count   = 0
-        self._hint        = None
-        self._hint_lock   = threading.Lock()
-        self._mic_on      = False   # starts MUTED — press m to enable
-        self._alive       = True
-
-        self.add_trigger(self._hint_trigger)
-        threading.Thread(target=self._kbd_reader, daemon=True, name="kbd").start()
-
-    # ── keyboard reader ───────────────────────────────────────────────────────
-
-    def _kbd_reader(self):
-        self._print_mic_state()
-        while self._alive:
-            try:
-                if select.select([sys.stdin], [], [], 0.3)[0]:
-                    line = sys.stdin.readline().strip()
-                    if line.lower() == "m":
-                        self._mic_on = not self._mic_on
-                        self._print_mic_state()
-                    elif line:
-                        with self._hint_lock:
-                            self._hint = line
-                        print(f"[Command queued: '{line}']\n")
-            except Exception:
-                break
-
-    def _print_mic_state(self):
-        if self._mic_on:
-            print("\n[MIC ON  — listening | press m + Enter to mute]\n")
-        else:
-            print("\n[MIC OFF — press m + Enter to unmute, or type a command]\n")
-
-    def _hint_trigger(self):
-        with self._hint_lock:
-            if not self._hint:
-                return False, False, ""
-            msg, self._hint = f"[User says: {self._hint}]", None
-        return True, False, msg
-
-    # ── mute gate — drop voice input when mic is off ──────────────────────────
 
     def parse_response(self, text: str) -> str:
-        # When mic is muted and this came from voice (not a typed hint),
-        # the hint_trigger would have already fired for typed input.
-        # We can't distinguish here perfectly, so we always process — the
-        # mute mainly prevents accidental wake-word triggers from noise.
+        print(f"[LLM] {repr(text[:200])}")
 
-        print(f"[LLM] {repr(text[:120])}")
-
+        # Case-insensitive ACTIONS: parsing
         match = re.search(r'actions:\s*(.+)', text, re.IGNORECASE)
         if match:
             actions = [a.strip().lower() for a in match.group(1).split(",") if a.strip()]
         else:
+            print("[parse] no ACTIONS line found")
             actions = ["stop"]
 
+        # Strip everything from ACTIONS: onward to get the reply text
         response_text = re.split(r'actions:', text, flags=re.IGNORECASE)[0].strip()
-        # Strip any literal template text the small model might copy
+        # Remove literal template text if the model copied it
         response_text = re.sub(r'(?i)response_text', '', response_text).strip()
 
-        # Anti-loop: flip if the same turn repeats too many times
+        # Anti-loop: flip a repeated turn direction
         if actions and actions[0] in self._FLIP:
             streak = 0
             for a in reversed(self._action_hist):
@@ -175,7 +129,7 @@ class SmartOllamaCar(VoiceActiveCar):
         return response_text
 
     def _drive(self, command: str):
-        """Execute a movement command directly on the car motors."""
+        """Drive the car motors directly — action_flow only handles gestures."""
         if command == "forward":
             self.car.set_dir_servo_angle(0)
             self.car.forward(DRIVE_SPEED)
@@ -201,43 +155,24 @@ class SmartOllamaCar(VoiceActiveCar):
         elif command == "stop":
             self.car.stop()
 
-    # ── smart obstacle avoidance ──────────────────────────────────────────────
-
     def is_too_close(self):
         triggered, disable_image, message = super().is_too_close()
         if triggered:
             self._obs_count += 1
             turn = "turn_right" if self._obs_count % 2 == 1 else "turn_left"
             self._drive(turn)
-            print(f"[Obstacle #{self._obs_count}] {turn}")
+            print(f"[Obstacle #{self._obs_count}] avoidance: {turn}")
             if self._obs_count >= 4:
                 self._drive(turn)
                 self._drive(turn)
                 self._obs_count = 0
-                print("[Obstacle] Stuck — wide escape done")
+                print("[Obstacle] wide escape done")
         else:
             self._obs_count = 0
         return triggered, disable_image, message
 
-    # ── mute: suppress voice-triggered LLM calls when mic is off ─────────────
 
-    def before_think(self, text):
-        self.led.blink(delay=0.1)
-        if not self._mic_on and "[User says:" not in text:
-            # Noise fired the wake word while muted — swallow it
-            print("[MIC OFF] ignoring voice input (press m to unmute)")
-            # Return a canned non-response so the LLM isn't called
-            # This relies on VoiceAssistant using before_think's return value;
-            # if it doesn't, the mute is best-effort only.
-            return "<<MUTED>>"
-        return text
-
-    def on_stop(self):
-        self._alive = False
-        super().on_stop()
-
-
-# ─── Startup health check ─────────────────────────────────────────────────────
+# ─── Ollama health check ──────────────────────────────────────────────────────
 
 def _wait_for_ollama(ip: str, retries: int = 3, delay: float = 2.0) -> bool:
     url = f"http://{ip}:11434/api/tags"
@@ -253,12 +188,10 @@ def _wait_for_ollama(ip: str, retries: int = 3, delay: float = 2.0) -> bool:
 
 
 if not _wait_for_ollama(OLLAMA_IP):
-    print(
-        "\nOllama is not running.\n"
-        "  Start it with: ollama serve\n"
-        f"  Pull model with: ollama pull {OLLAMA_MODEL}\n"
-    )
+    print("\nOllama is not running. In another terminal: ollama serve\n")
     sys.exit(1)
+
+# ─── Start ────────────────────────────────────────────────────────────────────
 
 llm = LLM(ip=OLLAMA_IP, model=OLLAMA_MODEL)
 
@@ -269,7 +202,7 @@ car = SmartOllamaCar(
     with_image=False,
     stt_language=STT_LANGUAGE,
     tts_model=TTS_MODEL,
-    keyboard_enable=False,   # our kbd thread handles all stdin
+    keyboard_enable=True,   # lets you type commands if voice isn't working
     wake_enable=WAKE_ENABLE,
     wake_word=WAKE_WORD,
     answer_on_wake=ANSWER_ON_WAKE,
